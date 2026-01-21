@@ -28,6 +28,18 @@
     "plugins": [
       "expo-router",
       [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Panorama Pro to access your camera to capture 360 images."
+        }
+      ],
+      [
+        "expo-sensors",
+        {
+          "motionPermission": "Allow Panorama Pro to use the gyroscope for guided 360 capture."
+        }
+      ],
+      [
         "expo-splash-screen",
         {
           "image": "./assets/images/splash-icon.png",
