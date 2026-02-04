@@ -1,17 +1,16 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { View, StyleSheet, PanResponder, Dimensions, Platform } from 'react-native';
 import { GLView } from 'expo-gl';
-import { Renderer, TextureLoader } from 'expo-three';
-import { 
-  Scene, 
-  PerspectiveCamera, 
-  SphereGeometry, 
-  MeshBasicMaterial, 
-  Mesh,
-  BackSide,
-  Vector2
-} from 'three';
 import { Gyroscope } from 'expo-sensors';
+import { Renderer, TextureLoader } from 'expo-three';
+import React, { useEffect, useRef, useState } from 'react';
+import { Dimensions, PanResponder, StyleSheet, View } from 'react-native';
+import {
+    BackSide,
+    Mesh,
+    MeshBasicMaterial,
+    PerspectiveCamera,
+    Scene,
+    SphereGeometry
+} from 'three';
 
 const { width, height } = Dimensions.get('window');
 

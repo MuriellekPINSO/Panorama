@@ -1,5 +1,5 @@
-import * as FileSystem from 'expo-file-system/legacy';
 import { CLOUD_CONFIG } from '@/config/cloud-config';
+import * as FileSystem from 'expo-file-system/legacy';
 
 /**
  * Service Cloud pour l'assemblage de panoramas 360°

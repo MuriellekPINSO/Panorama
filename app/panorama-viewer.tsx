@@ -15,8 +15,10 @@ const PHOTO_WIDTH = width; // Chaque photo prend la largeur de l'écran
 interface Panorama {
   id: string;
   title: string;
-  photos: string[];
-  thumbnail: string;
+  stitched: boolean;
+  panoramaUri?: string;    // Si assemblé (une seule image)
+  photos?: string[];       // Si non assemblé (8 photos)
+  thumbnail?: string;
   createdAt: number;
   photoCount: number;
 }
@@ -27,15 +29,39 @@ export default function PanoramaViewerScreen() {
   const colorScheme = useColorScheme() ?? 'light';
   const colors = Colors[colorScheme];
   
-  const [panorama, setPanorama] = useState<Panorama | null>(
-    params.data ? JSON.parse(params.data as string) : null
-  );
+  // Support pour les deux formats de données
+  const [panorama, setPanorama] = useState<Panorama | null>(() => {
+    // Format 1: URI directe passée en paramètre
+    if (params.uri) {
+      return {
+        id: 'temp',
+        title: (params.title as string) || 'Panorama 360°',
+        stitched: true,
+        panoramaUri: params.uri as string,
+        createdAt: Date.now(),
+        photoCount: 8
+      };
+    }
+    // Format 2: Objet complet passé en JSON
+    if (params.data) {
+      return JSON.parse(params.data as string);
+    }
+    return null;
+  });
+  
   const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
   const [is360Mode, setIs360Mode] = useState(false);
   const [gyroEnabled, setGyroEnabled] = useState(false);
   const scrollX = useRef(new Animated.Value(0)).current;
   const scrollViewRef = useRef<ScrollView>(null);
   const gyroRotation = useRef(0);
+
+  // Pour les panoramas assemblés, activer automatiquement le mode 360
+  useEffect(() => {
+    if (panorama?.stitched) {
+      setIs360Mode(true);
+    }
+  }, [panorama]);
 
   // Gyroscope pour rotation panoramique continue
   useEffect(() => {
@@ -47,21 +73,25 @@ export default function PanoramaViewerScreen() {
       // Accumuler la rotation (plus fluide)
       gyroRotation.current += z * 20;
       
-      // Calculer la position de scroll
-      // Utiliser la deuxième série de photos (milieu des 3 répétitions) pour éviter les bords
-      const baseOffset = PHOTO_WIDTH * 8; // Commencer au milieu
-      const totalWidth = PHOTO_WIDTH * 8;
-      let scrollPosition = baseOffset + (gyroRotation.current % totalWidth);
-      
-      // Assurer une boucle infinie
-      if (scrollPosition < 0) scrollPosition += totalWidth * 3;
-      if (scrollPosition > totalWidth * 3) scrollPosition -= totalWidth * 3;
-      
-      scrollViewRef.current?.scrollTo({ x: scrollPosition, animated: false });
+      if (panorama?.stitched && panorama.panoramaUri) {
+        // Pour un panorama assemblé: scroll horizontal sur l'image
+        const maxScroll = width * 3; // Image équirectangulaire est environ 3x plus large
+        let scrollPosition = (gyroRotation.current % maxScroll);
+        if (scrollPosition < 0) scrollPosition += maxScroll;
+        scrollViewRef.current?.scrollTo({ x: scrollPosition, animated: false });
+      } else if (panorama?.photos) {
+        // Pour des photos individuelles
+        const baseOffset = PHOTO_WIDTH * 8;
+        const totalWidth = PHOTO_WIDTH * 8;
+        let scrollPosition = baseOffset + (gyroRotation.current % totalWidth);
+        if (scrollPosition < 0) scrollPosition += totalWidth * 3;
+        if (scrollPosition > totalWidth * 3) scrollPosition -= totalWidth * 3;
+        scrollViewRef.current?.scrollTo({ x: scrollPosition, animated: false });
+      }
     });
 
     return () => subscription.remove();
-  }, [is360Mode, gyroEnabled]);
+  }, [is360Mode, gyroEnabled, panorama]);
 
   // Activer le gyroscope
   useEffect(() => {
@@ -82,11 +112,25 @@ export default function PanoramaViewerScreen() {
       useNativeDriver: false,
       listener: (event: any) => {
         const offsetX = event.nativeEvent.contentOffset.x;
-        const index = Math.round(offsetX / PHOTO_WIDTH) % 8;
-        setCurrentPhotoIndex(index);
+        if (panorama?.stitched) {
+          // Pour un panorama assemblé, calculer l'angle approximatif
+          const angle = Math.round((offsetX / (width * 3)) * 360) % 360;
+          setCurrentPhotoIndex(Math.floor(angle / 45));
+        } else {
+          const index = Math.round(offsetX / PHOTO_WIDTH) % 8;
+          setCurrentPhotoIndex(index);
+        }
       }
     }
   );
+
+  // Obtenir les photos à afficher
+  const getPhotos = (): string[] => {
+    if (panorama?.stitched && panorama.panoramaUri) {
+      return [panorama.panoramaUri];
+    }
+    return panorama?.photos || [];
+  };
 
   if (!panorama) {
     return (
@@ -167,7 +211,7 @@ export default function PanoramaViewerScreen() {
             </View>
           </View>
           
-          {/* Vue panoramique immersive avec toutes les photos assemblées */}
+          {/* Vue panoramique immersive */}
           <View style={styles.panoramaWrapper}>
             <Animated.ScrollView
               ref={scrollViewRef}
@@ -182,15 +226,32 @@ export default function PanoramaViewerScreen() {
               contentContainerStyle={styles.panoramaContent}
               bounces={false}
             >
-              {/* Créer un panorama continu en répétant les photos */}
-              {[...panorama.photos, ...panorama.photos, ...panorama.photos].map((photo, idx) => (
-                <Image
-                  key={idx}
-                  source={{ uri: photo }}
-                  style={styles.panoramaPhoto}
-                  resizeMode="cover"
-                />
-              ))}
+              {panorama.stitched && panorama.panoramaUri ? (
+                // Panorama assemblé: une seule image large
+                <>
+                  <Image
+                    source={{ uri: panorama.panoramaUri }}
+                    style={styles.stitchedPanorama}
+                    resizeMode="cover"
+                  />
+                  {/* Répéter pour boucle infinie */}
+                  <Image
+                    source={{ uri: panorama.panoramaUri }}
+                    style={styles.stitchedPanorama}
+                    resizeMode="cover"
+                  />
+                </>
+              ) : (
+                // Photos individuelles: répétées 3 fois pour boucle
+                [...getPhotos(), ...getPhotos(), ...getPhotos()].map((photo, idx) => (
+                  <Image
+                    key={idx}
+                    source={{ uri: photo }}
+                    style={styles.panoramaPhoto}
+                    resizeMode="cover"
+                  />
+                ))
+              )}
             </Animated.ScrollView>
           </View>
 
@@ -198,12 +259,12 @@ export default function PanoramaViewerScreen() {
             <View style={styles.compassContainer}>
               <IconSymbol name="location.circle.fill" size={20} color="#1D8CF8" />
               <ThemedText style={styles.compassText}>
-                {['Nord', 'Nord-Est', 'Est', 'Sud-Est', 'Sud', 'Sud-Ouest', 'Ouest', 'Nord-Ouest'][currentPhotoIndex]}
+                {['Nord', 'Nord-Est', 'Est', 'Sud-Est', 'Sud', 'Sud-Ouest', 'Ouest', 'Nord-Ouest'][currentPhotoIndex % 8]}
               </ThemedText>
             </View>
             <View style={styles.photoCounter}>
               <ThemedText style={styles.counterText}>
-                {Math.round((currentPhotoIndex * 45))}°
+                {Math.round((currentPhotoIndex * 45) % 360)}°
               </ThemedText>
             </View>
           </View>
@@ -213,54 +274,60 @@ export default function PanoramaViewerScreen() {
         <ScrollView style={styles.content}>
           <View style={styles.mainPhotoContainer}>
             <Image 
-              source={{ uri: panorama.photos[currentPhotoIndex] }} 
+              source={{ uri: getPhotos()[currentPhotoIndex] || getPhotos()[0] }} 
               style={styles.mainPhoto}
               resizeMode="cover"
             />
             <View style={styles.photoCounter}>
               <ThemedText style={styles.counterText}>
-                {currentPhotoIndex + 1} / {panorama.photoCount}
+                {panorama.stitched ? 'Assemblé' : `${currentPhotoIndex + 1} / ${panorama.photoCount}`}
               </ThemedText>
             </View>
           </View>
 
-          {/* Navigation entre les photos */}
-          <ScrollView 
-            horizontal 
-            showsHorizontalScrollIndicator={false}
-            style={styles.thumbnailScroll}
-            contentContainerStyle={styles.thumbnailContainer}
-          >
-            {panorama.photos.map((photo, index) => (
-              <TouchableOpacity
-                key={index}
-                onPress={() => setCurrentPhotoIndex(index)}
-                style={[
-                  styles.thumbnail,
-                  index === currentPhotoIndex && styles.thumbnailActive
-                ]}
-              >
-                <Image 
-                  source={{ uri: photo }} 
-                  style={styles.thumbnailImage}
-                  resizeMode="cover"
-                />
-                {index === currentPhotoIndex && (
-                  <View style={styles.thumbnailOverlay}>
-                    <View style={styles.activeDot} />
-                  </View>
-                )}
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
+          {/* Navigation entre les photos (seulement si non assemblé) */}
+          {!panorama.stitched && getPhotos().length > 1 && (
+            <ScrollView 
+              horizontal 
+              showsHorizontalScrollIndicator={false}
+              style={styles.thumbnailScroll}
+              contentContainerStyle={styles.thumbnailContainer}
+            >
+              {getPhotos().map((photo, index) => (
+                <TouchableOpacity
+                  key={index}
+                  onPress={() => setCurrentPhotoIndex(index)}
+                  style={[
+                    styles.thumbnail,
+                    index === currentPhotoIndex && styles.thumbnailActive
+                  ]}
+                >
+                  <Image 
+                    source={{ uri: photo }} 
+                    style={styles.thumbnailImage}
+                    resizeMode="cover"
+                  />
+                  {index === currentPhotoIndex && (
+                    <View style={styles.thumbnailOverlay}>
+                      <View style={styles.activeDot} />
+                    </View>
+                  )}
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          )}
 
           {/* Informations */}
           <View style={[styles.infoCard, { backgroundColor: colors.card }]}>
             <View style={styles.infoRow}>
               <IconSymbol name="photo" size={20} color="#1D8CF8" />
               <View style={styles.infoTextContainer}>
-                <ThemedText style={styles.infoLabel}>Photos capturées</ThemedText>
-                <ThemedText style={styles.infoValue}>{panorama.photoCount} images</ThemedText>
+                <ThemedText style={styles.infoLabel}>
+                  {panorama.stitched ? 'Panorama assemblé' : 'Photos capturées'}
+                </ThemedText>
+                <ThemedText style={styles.infoValue}>
+                  {panorama.stitched ? 'Image équirectangulaire 360°' : `${panorama.photoCount} images`}
+                </ThemedText>
               </View>
             </View>
 
@@ -284,7 +351,9 @@ export default function PanoramaViewerScreen() {
               <IconSymbol name="globe" size={20} color="#1D8CF8" />
               <View style={styles.infoTextContainer}>
                 <ThemedText style={styles.infoLabel}>Type</ThemedText>
-                <ThemedText style={styles.infoValue}>Panorama 360° (8 points)</ThemedText>
+                <ThemedText style={styles.infoValue}>
+                  {panorama.stitched ? 'Panorama 360° assemblé' : 'Panorama 360° (8 points)'}
+                </ThemedText>
               </View>
             </View>
           </View>
@@ -371,6 +440,10 @@ const styles = StyleSheet.create({
   },
   panoramaPhoto: {
     width: PHOTO_WIDTH,
+    height: height - 180,
+  },
+  stitchedPanorama: {
+    width: width * 3,  // Image équirectangulaire (ratio 2:1, affichée large pour scroll)
     height: height - 180,
   },
   panoramaInfo: {
