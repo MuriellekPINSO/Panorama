@@ -17,6 +17,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import PanoramaService from '../services/panorama-teleport';
+import CaptureSphere3D from './CaptureSphere3D';
 
 const { width } = Dimensions.get('window');
 
@@ -36,10 +37,10 @@ interface GuidedCaptureState {
   panoramaResult: any | null;
 }
 
-const CAPTURE_POINTS = 12;
-const AZIMUTH_TOLERANCE = 15;
-const READY_THRESHOLD = 8;
-const VIEWFINDER_SIZE = Math.min(width * 0.78, 320);
+const CAPTURE_POINTS = 16;
+const AZIMUTH_TOLERANCE = 12;
+const READY_THRESHOLD = 6;
+const VIEWFINDER_SIZE = Math.min(width * 0.85, 340);
 const POINTS_AZIMUTHS = Array.from({ length: CAPTURE_POINTS }, (_, index) => (index * 360) / CAPTURE_POINTS);
 
 export const Panorama360CaptureGuided: React.FC = () => {
@@ -242,74 +243,16 @@ export const Panorama360CaptureGuided: React.FC = () => {
   );
 
   const renderCenterOverlay = () => {
-    const captureCircleRadius = 32;
-    const containerRadius = VIEWFINDER_SIZE / 2.2;
-
     return (
-      <View style={styles.centerOverlay} pointerEvents="none">
-        <View style={[styles.viewfinderBox, { width: VIEWFINDER_SIZE, height: VIEWFINDER_SIZE * 1.12 }]}>
-          {/* Background frame */}
-          <View style={styles.viewfinderFrame} />
-
-          {/* Center circle indicator */}
-          <View
-            style={[
-              styles.centerCircleIndicator,
-              isReadyToCapture && styles.centerCircleActive,
-            ]}
-          />
-
-          {/* Captured points (green circles) */}
-          {state.capturedPoints.map((point, idx) => {
-            const angleIndex = POINTS_AZIMUTHS.findIndex(
-              a => Math.abs(a - point.azimuth) <= AZIMUTH_TOLERANCE
-            );
-            const angle = (angleIndex * 360) / CAPTURE_POINTS;
-            const rad = (angle * Math.PI) / 180;
-            const x = containerRadius * Math.cos(rad);
-            const y = containerRadius * Math.sin(rad);
-
-            return (
-              <View
-                key={idx}
-                style={[
-                  styles.capturePointMarker,
-                  {
-                    left: VIEWFINDER_SIZE / 2 + x - captureCircleRadius,
-                    top: VIEWFINDER_SIZE * 0.56 + y - captureCircleRadius,
-                  },
-                ]}
-              />
-            );
-          })}
-
-          {/* Next target point (if not captured) */}
-          {nextPoint !== null && state.capturedPoints.length < CAPTURE_POINTS && (
-            (() => {
-              const angleIndex = POINTS_AZIMUTHS.findIndex(a => Math.abs(a - nextPoint) <= AZIMUTH_TOLERANCE);
-              const angle = (angleIndex * 360) / CAPTURE_POINTS;
-              const rad = (angle * Math.PI) / 180;
-              const x = containerRadius * Math.cos(rad);
-              const y = containerRadius * Math.sin(rad);
-              const opacity = isReadyToCapture ? 1 : 0.5;
-
-              return (
-                <View
-                  style={[
-                    styles.nextPointMarker,
-                    {
-                      left: VIEWFINDER_SIZE / 2 + x - captureCircleRadius / 1.2,
-                      top: VIEWFINDER_SIZE * 0.56 + y - captureCircleRadius / 1.2,
-                      opacity,
-                    },
-                  ]}
-                >
-                  <View style={[styles.nextPointCircle, isReadyToCapture && styles.nextPointReady]} />
-                </View>
-              );
-            })()
-          )}
-        </View>
+      <View style={styles.centerOverlay} pointerEvents="box-none">
+        <CaptureSphere3D
+          capturedPoints={state.capturedPoints}
+          targetAzimuths={POINTS_AZIMUTHS}
+          currentAzimuth={state.currentAzimuth}
+          nextTargetAzimuth={nextPoint}
+          isReadyToCapture={isReadyToCapture}
+          size={VIEWFINDER_SIZE}
+        />
 
         {/* Guidance text */}
         <Text style={styles.guidanceHeadline}>{guidanceMessage}</Text>
