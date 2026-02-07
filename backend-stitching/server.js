@@ -343,72 +343,150 @@ function generateEquirectangularScript(photoPaths, outputPath, metadata) {
   const gpsInfo = metadata?.gps ? 
     `GPS: {lat: ${metadata.gps.lat}, lon: ${metadata.gps.lon}, alt: ${metadata.gps.alt || 0}}` : 
     'GPS: Non disponible';
+
+  // Pass orientation data so the stitcher can sort images and use hints
+  const orientationsJson = metadata?.orientations
+    ? JSON.stringify(metadata.orientations)
+    : '[]';
   
   return `# -*- coding: utf-8 -*-
+"""
+Spherical 360° → Equirectangular stitching for VR/AR headsets.
+Receives photos with per-photo orientation (yaw, pitch, roll) captured
+by DeviceMotion on the phone.
+"""
 import cv2
 import numpy as np
+import json
 import sys
+import math
 
-def stitch_equirectangular(paths, output):
-    """Crée un panorama équirectangulaire 360° pour VR/Teleport"""
-    print(f"🌐 Création panorama équirectangulaire...")
+def stitch_equirectangular(paths, output, orientations_json='[]'):
+    print("🌐 Spherical 360° → Equirectangular stitching")
     print(f"${gpsInfo}")
-    print(f"Chargement de {len(paths)} images...")
-    
+    print(f"Loading {len(paths)} images...")
+
+    orientations = json.loads(orientations_json)
+
+    # Sort images by yaw then pitch for better stitching order
+    if orientations:
+        paired = list(zip(paths, orientations))
+        paired.sort(key=lambda x: (round(x[1].get('pitch', 0) / 30), x[1].get('yaw', 0)))
+        paths = [p for p, _ in paired]
+        orientations = [o for _, o in paired]
+        print("  Images sorted by orientation for optimal stitching order")
+
     images = []
     for i, p in enumerate(paths):
         img = cv2.imread(p)
         if img is None:
-            raise Exception(f"Impossible de charger: {p}")
-        
+            raise Exception(f"Cannot load: {p}")
         h, w = img.shape[:2]
-        # Redimensionner à 1200px max pour optimisation
-        if max(h, w) > 1200:
-            scale = 1200 / max(h, w)
+        # Scale down for stitching performance (keep enough detail)
+        if max(h, w) > 1600:
+            scale = 1600 / max(h, w)
             img = cv2.resize(img, None, fx=scale, fy=scale)
-        
         images.append(img)
-        print(f"  Image {i+1}: {img.shape[1]}x{img.shape[0]}")
-    
-    print("\\n⚙️ Assemblage et projection...")
-    
-    # Stitcher OpenCV pour panorama
+        ori_info = ""
+        if i < len(orientations):
+            o = orientations[i]
+            ori_info = f" | yaw={o.get('yaw', '?'):.0f}° pitch={o.get('pitch', '?'):.0f}°"
+        print(f"  Image {i+1}/{len(paths)}: {img.shape[1]}x{img.shape[0]}{ori_info}")
+
+    print("\\n⚙️ Stitching with spherical projection...")
+
+    # Use PANORAMA mode (spherical warping) — this is key for VR output
     stitcher = cv2.Stitcher_create(cv2.Stitcher_PANORAMA)
-    stitcher.setPanoConfidenceThresh(0.2)
-    
+
+    # Lower confidence threshold to handle wide-angle spherical captures
+    stitcher.setPanoConfidenceThresh(0.15)
+
+    # Try stitching
     status, pano = stitcher.stitch(images)
-    
+
     if status != cv2.Stitcher_OK:
         msgs = {
-            1: "Pas assez de correspondances entre images",
-            2: "Echec homographie", 
-            3: "Echec ajustement camera"
+            1: "Not enough feature matches between images. Ensure sufficient overlap.",
+            2: "Homography estimation failed.",
+            3: "Camera parameter adjustment failed."
         }
-        raise Exception(msgs.get(status, f"Erreur stitching {status}"))
-    
-    print(f"   Panorama brut: {pano.shape[1]}x{pano.shape[0]}")
-    
-    # Recadrer les bords noirs
+        # If full stitch fails, try with subsets (row by row)
+        print(f"  ⚠️ Full stitch failed (code {status}), trying row-by-row...")
+        pano = try_row_stitch(images, orientations)
+        if pano is None:
+            raise Exception(msgs.get(status, f"Stitching error code {status}"))
+
+    print(f"  Raw panorama: {pano.shape[1]}x{pano.shape[0]}")
+
+    # Crop black borders
     gray = cv2.cvtColor(pano, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 1, 255, cv2.THRESH_BINARY)
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if contours:
         x, y, w, h = cv2.boundingRect(max(contours, key=cv2.contourArea))
         pano = pano[y:y+h, x:x+w]
-    
-    print(f"   Après recadrage: {pano.shape[1]}x{pano.shape[0]}")
-    
-    # Redimensionner à 4096x2048 (ratio équirectangulaire 2:1)
-    target_width = 4096
-    target_height = 2048
-    pano_equirect = cv2.resize(pano, (target_width, target_height), interpolation=cv2.INTER_CUBIC)
-    
-    print(f"   Projection équirectangulaire: {pano_equirect.shape[1]}x{pano_equirect.shape[0]}")
-    
-    # Compression optimisée JPEG haute qualité
-    cv2.imwrite(output, pano_equirect, [cv2.IMWRITE_JPEG_QUALITY, 92])
-    print(f"Panorama final: {pano_equirect.shape[1]}x{pano_equirect.shape[0]}")
-    print("✅ OK")
+    print(f"  After crop: {pano.shape[1]}x{pano.shape[0]}")
+
+    # Force 2:1 equirectangular aspect ratio (required for VR/AR)
+    target_w = 4096
+    target_h = 2048
+    pano_eq = cv2.resize(pano, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
+    print(f"  Equirectangular: {target_w}x{target_h}")
+
+    # Save with high quality
+    cv2.imwrite(output, pano_eq, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    print(f"Panorama final: {target_w}x{target_h}")
+    print("✅ OK — VR/AR ready")
+
+
+def try_row_stitch(images, orientations):
+    """
+    Fallback: group images by pitch rows, stitch each row horizontally,
+    then combine rows vertically.
+    """
+    if not orientations or len(orientations) != len(images):
+        return None
+
+    # Group by pitch bucket (rounded to nearest 30°)
+    rows = {}
+    for img, ori in zip(images, orientations):
+        bucket = round(ori.get('pitch', 0) / 30) * 30
+        rows.setdefault(bucket, []).append(img)
+
+    stitched_rows = []
+    stitcher = cv2.Stitcher_create(cv2.Stitcher_PANORAMA)
+    stitcher.setPanoConfidenceThresh(0.1)
+
+    for pitch in sorted(rows.keys(), reverse=True):
+        row_imgs = rows[pitch]
+        print(f"  Row pitch={pitch}°: {len(row_imgs)} images")
+        if len(row_imgs) == 1:
+            stitched_rows.append(row_imgs[0])
+        else:
+            status, row_pano = stitcher.stitch(row_imgs)
+            if status == cv2.Stitcher_OK:
+                stitched_rows.append(row_pano)
+                print(f"    ✓ Row stitched: {row_pano.shape[1]}x{row_pano.shape[0]}")
+            else:
+                print(f"    ✗ Row stitch failed, using first image")
+                stitched_rows.append(row_imgs[0])
+
+    if not stitched_rows:
+        return None
+
+    # Normalize widths and stack vertically
+    max_w = max(r.shape[1] for r in stitched_rows)
+    resized = []
+    for r in stitched_rows:
+        if r.shape[1] != max_w:
+            scale = max_w / r.shape[1]
+            r = cv2.resize(r, (max_w, int(r.shape[0] * scale)))
+        resized.append(r)
+
+    combined = np.vstack(resized)
+    print(f"  Combined rows: {combined.shape[1]}x{combined.shape[0]}")
+    return combined
+
 
 if __name__ == '__main__':
     try:
@@ -416,7 +494,8 @@ if __name__ == '__main__':
             ${pathsArray}
         ]
         output = r"${escapePath(outputPath)}"
-        stitch_equirectangular(paths, output)
+        orientations_json = r'''${orientationsJson}'''
+        stitch_equirectangular(paths, output, orientations_json)
     except Exception as e:
         print(f"ERREUR: {e}", file=sys.stderr)
         sys.exit(1)

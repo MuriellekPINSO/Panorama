@@ -1,11 +1,10 @@
-﻿import React from 'react';
-import { View } from 'react-native';
-import Panorama360CaptureGuided from '@/components/Panorama360CaptureGuided';
+﻿import PanoramaCapture from '@/components/PanoramaCapture';
 
 /**
- * Ã‰cran de capture Teleport 360Â°
- * Utilise l'interface guidÃ©e avec boussole et feedback visuel
+ * 360° Spherical Capture Screen
+ * Captures photos covering the full sphere using DeviceMotion guidance.
+ * Output: VR/AR-compatible equirectangular panorama.
  */
 export default function CreateScreen() {
-  return <Panorama360CaptureGuided />;
+  return <PanoramaCapture />;
 }

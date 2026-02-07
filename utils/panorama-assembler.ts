@@ -1,190 +1,139 @@
 import * as FileSystem from 'expo-file-system/legacy';
 
 /**
- * Interface pour la configuration du serveur de stitching
+ * Configuration for the stitching backend
  */
 export interface StitchingConfig {
   serverUrl: string;
   timeout?: number;
-  quality?: number;
 }
 
 /**
- * Upload photos to backend stitching server for panorama assembly
- * Uses OpenCV on the backend to perform proper image stitching with:
- * - Feature detection and matching
- * - Geometric alignment
- * - Distortion correction
- * - Seamless edge blending
- * 
- * @param photos - Array of photo file URIs to stitch
- * @param config - Backend server configuration
- * @returns Promise resolving to the stitched panorama URI
+ * Orientation data for each captured photo
  */
-export async function assemblePanorama(
-  photos: string[],
-  config: StitchingConfig
-): Promise<string> {
-  console.log('🔄 assemblePanorama called with:', {
-    photoCount: photos.length,
-    serverUrl: config.serverUrl,
-    timeout: config.timeout
-  });
+export interface PhotoOrientation {
+  targetId: number;
+  yaw: number;    // degrees, 0-360
+  pitch: number;  // degrees, -90 to +90
+  roll: number;   // degrees
+  timestamp: number;
+}
 
-  if (photos.length !== 8) {
-    throw new Error(`Exactly 8 photos required for 360° panorama, got ${photos.length}`);
+/**
+ * Upload spherical capture photos to backend for equirectangular stitching.
+ *
+ * The backend uses OpenCV to:
+ *   - Feature-match overlapping photos
+ *   - Compute homographies and camera parameters
+ *   - Warp all photos onto a spherical projection
+ *   - Output a 2:1 equirectangular JPEG (VR/AR-ready)
+ *
+ * @param photos  Array of local file URIs (JPEG)
+ * @param orientations  Per-photo device orientation at capture time
+ * @param config  Server URL and timeout
+ * @param onProgress  Optional upload progress callback (0-100)
+ * @returns Local file path of the downloaded equirectangular panorama
+ */
+export async function assembleSphericalPanorama(
+  photos: string[],
+  orientations: PhotoOrientation[],
+  config: StitchingConfig,
+  onProgress?: (percent: number) => void,
+): Promise<string> {
+  if (photos.length < 3) {
+    throw new Error(`Need at least 3 photos, got ${photos.length}`);
   }
 
-  // Vérifier que toutes les photos existent
+  // 1. Verify all photos exist
   for (let i = 0; i < photos.length; i++) {
     const info = await FileSystem.getInfoAsync(photos[i]);
-    if (!info.exists) {
-      throw new Error(`Photo ${i + 1} not found: ${photos[i]}`);
-    }
-    console.log(`✓ Photo ${i + 1} verified: ${(info.size || 0) / 1024} KB`);
+    if (!info.exists) throw new Error(`Photo ${i + 1} not found: ${photos[i]}`);
   }
 
+  // 2. Check server health
   try {
-    console.log('🔄 Starting panorama stitching process...');
+    const health = await fetch(`${config.serverUrl}/api/health`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!health.ok) throw new Error(`Health check ${health.status}`);
+  } catch (e: any) {
+    throw new Error(`Server unreachable at ${config.serverUrl}: ${e.message}`);
+  }
 
-    // D'abord, vérifier si le serveur est accessible
-    console.log(`🔍 Checking server health at ${config.serverUrl}...`);
-    try {
-      const healthCheck = await fetch(`${config.serverUrl}/api/health`, {
-        method: 'GET',
-        signal: AbortSignal.timeout(5000) // 5 secondes timeout pour le health check
-      });
-      
-      if (!healthCheck.ok) {
-        throw new Error(`Server health check failed: ${healthCheck.status}`);
-      }
-      console.log('✅ Server is healthy');
-    } catch (healthError: any) {
-      console.error('❌ Server not reachable:', healthError.message);
-      throw new Error(`Serveur non accessible: ${config.serverUrl}. Vérifiez que le serveur backend est démarré.`);
-    }
+  onProgress?.(5);
 
-    // Create FormData to upload all photos
-    const formData = new FormData();
+  // 3. Build multipart form data
+  const formData = new FormData();
 
-    // Add each photo to the form data
-    for (let i = 0; i < photos.length; i++) {
-      const photoUri = photos[i];
-      console.log(`📤 Preparing photo ${i + 1}/8: ${photoUri}`);
-      
-      // Read file and create blob
-      const fileData = await FileSystem.readAsStringAsync(photoUri, {
-        encoding: FileSystem.EncodingType.Base64
-      });
-      
-      console.log(`   Base64 length: ${fileData.length} chars`);
-      
-      // Create blob from base64
-      const blob = await (async () => {
-        const res = await fetch(`data:image/jpeg;base64,${fileData}`);
-        return res.blob();
-      })();
+  for (let i = 0; i < photos.length; i++) {
+    const base64 = await FileSystem.readAsStringAsync(photos[i], {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+    const blob = await (await fetch(`data:image/jpeg;base64,${base64}`)).blob();
 
-      console.log(`   Blob size: ${blob.size} bytes`);
-      formData.append('photos', blob, `photo_${i}.jpg`);
-    }
+    const ori = orientations[i];
+    const name = `photo_${ori?.targetId ?? i}_y${Math.round(ori?.yaw ?? 0)}_p${Math.round(ori?.pitch ?? 0)}.jpg`;
+    formData.append('photos', blob, name);
 
-    console.log(`📤 Uploading ${photos.length} photos to stitching server...`);
+    onProgress?.(5 + Math.round((i / photos.length) * 40));
+  }
 
-    // Create abort controller for timeout
-    const abortController = new AbortController();
-    const timeoutMs = config.timeout || 300000; // 5 minutes default
-    const timeoutId = setTimeout(() => {
-      console.log('⏰ Request timeout reached, aborting...');
-      abortController.abort();
-    }, timeoutMs);
+  // Attach orientation metadata so the stitcher can use it for initial alignment
+  formData.append(
+    'metadata',
+    JSON.stringify({
+      captureType: 'spherical-360',
+      photoCount: photos.length,
+      orientations,
+      timestamp: new Date().toISOString(),
+    }),
+  );
 
-    // Send to backend stitching server
-    console.log(`📡 POST ${config.serverUrl}/api/stitch-panorama`);
-    const response = await fetch(`${config.serverUrl}/api/stitch-panorama`, {
+  onProgress?.(50);
+
+  // 4. Upload & stitch
+  const timeout = config.timeout || 300_000;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeout);
+
+  try {
+    const resp = await fetch(`${config.serverUrl}/api/stitch-panorama`, {
       method: 'POST',
       body: formData,
-      signal: abortController.signal
+      signal: ctrl.signal,
     });
+    clearTimeout(timer);
 
-    clearTimeout(timeoutId);
-
-    console.log(`📥 Response status: ${response.status} ${response.statusText}`);
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Server error response:', errorText);
-      throw new Error(`Server error (${response.status}): ${response.statusText}`);
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Server error ${resp.status}: ${text}`);
     }
 
-    const result = await response.json();
-    console.log('📦 Server response:', result);
+    const result = await resp.json();
+    if (!result.success) throw new Error(result.error || 'Stitching failed');
 
-    if (!result.success) {
-      throw new Error(result.error || 'Panorama stitching failed on server');
-    }
+    onProgress?.(80);
 
-    console.log('✅ Panorama successfully stitched!');
-    console.log(`📊 Stitched panorama URL: ${result.panoramaUrl}`);
-
-    // Download the stitched panorama to local storage
+    // 5. Download result locally
     return await downloadPanorama(result.panoramaUrl);
-
-  } catch (error: any) {
-    console.error('❌ Error during panorama stitching:', error);
-    
-    // Améliorer les messages d'erreur
-    if (error.name === 'AbortError') {
-      throw new Error('Timeout: L\'assemblage a pris trop de temps. Réessayez.');
-    }
-    if (error.message?.includes('Network request failed')) {
-      throw new Error('Erreur réseau: Impossible de joindre le serveur d\'assemblage.');
-    }
-    
-    throw error;
+  } catch (e: any) {
+    clearTimeout(timer);
+    if (e.name === 'AbortError') throw new Error('Stitching timed out');
+    throw e;
   }
 }
 
 /**
- * Download stitched panorama from server and save locally
+ * Download a stitched panorama JPEG and save to the app's document directory.
  */
-async function downloadPanorama(panoramaUrl: string): Promise<string> {
-  try {
-    // Create panoramas directory
-    const panoramaDir = `${FileSystem.documentDirectory}stitched-panoramas/`;
-    const dirInfo = await FileSystem.getInfoAsync(panoramaDir);
-    
-    if (!dirInfo.exists) {
-      await FileSystem.makeDirectoryAsync(panoramaDir, { intermediates: true });
-    }
-
-    // Download panorama
-    const filename = `panorama_${Date.now()}.jpg`;
-    const localPath = `${panoramaDir}${filename}`;
-
-    console.log(`⬇️  Downloading panorama to local storage...`);
-    
-    const downloadResult = await FileSystem.downloadAsync(
-      panoramaUrl,
-      localPath
-    );
-
-    console.log(`✅ Panorama saved locally: ${localPath}`);
-    return localPath;
-
-  } catch (error) {
-    console.error('Error downloading panorama:', error);
-    throw error;
+async function downloadPanorama(url: string): Promise<string> {
+  const dir = `${FileSystem.documentDirectory}panoramas/`;
+  const info = await FileSystem.getInfoAsync(dir);
+  if (!info.exists) {
+    await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
   }
-}
 
-/**
- * Alternative: Create a simple horizontal mosaic without stitching
- * Use this if backend stitching is unavailable
- * Note: This creates individual image tiles, not a seamless panorama
- */
-export async function createPanoramaMosaic(photos: string[]): Promise<string[]> {
-  // Return all photos as a fallback (app will display as sequence)
-  // This is NOT recommended - proper stitching creates true 360° panoramas
-  return photos;
+  const localPath = `${dir}pano_${Date.now()}.jpg`;
+  await FileSystem.downloadAsync(url, localPath);
+  return localPath;
 }
